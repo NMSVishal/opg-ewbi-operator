@@ -22,7 +22,7 @@ import (
 
 	"github.com/go-logr/logr"
 	opgmodels "github.com/nbycomp/neonephos-opg-ewbi-api/api/federation/models"
-	"github.com/nbycomp/neonephos-opg-ewbi-operator/api/v1beta1"
+	"github.com/neonephos-katalis/opg-ewbi-operator/api/v1beta1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
