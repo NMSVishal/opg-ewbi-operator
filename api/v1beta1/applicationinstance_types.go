@@ -80,10 +80,11 @@ const (
 
 // ApplicationInstanceStatus defines the observed state of ApplicationInstance.
 type ApplicationInstanceStatus struct {
-	State      ApplicationInstanceState `json:"state,omitempty"`
-	Conditions []metav1.Condition       `json:"conditions,omitempty"`
-	Phase      ApplicationInstancePhase `json:"phase,omitempty"`
-	ErrorMsg   string                   `json:"errorMsg,omitempty"`
+	State       ApplicationInstanceState `json:"state,omitempty"`
+	Conditions  []metav1.Condition       `json:"conditions,omitempty"`
+	Phase       ApplicationInstancePhase `json:"phase,omitempty"`
+	ErrorMsg    string                   `json:"errorMsg,omitempty"`
+	Ipv4Address string                   `json:"ipv4Address,omitempty"`
 }
 
 // +kubebuilder:object:root=true
