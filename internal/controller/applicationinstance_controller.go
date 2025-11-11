@@ -21,7 +21,7 @@ import (
 	"errors"
 	"time"
 
-	opgmodels "github.com/neonephos-katalis/opg-ewbi-api/api/federation/models"
+	opgmodels "github.com/nbycomp/neonephos-opg-ewbi-api/api/federation/models"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -29,9 +29,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/neonephos-katalis/opg-ewbi-operator/api/v1beta1"
-	opgewbiv1beta1 "github.com/neonephos-katalis/opg-ewbi-operator/api/v1beta1"
-	"github.com/neonephos-katalis/opg-ewbi-operator/internal/opg"
+	"github.com/nbycomp/neonephos-opg-ewbi-operator/api/v1beta1"
+	opgewbiv1beta1 "github.com/nbycomp/neonephos-opg-ewbi-operator/api/v1beta1"
+	"github.com/nbycomp/neonephos-opg-ewbi-operator/internal/opg"
 )
 
 // ApplicationInstanceReconciler reconciles a ApplicationInstance object
@@ -142,7 +142,6 @@ func (r *ApplicationInstanceReconciler) Reconcile(
 		}
 	} else {
 		a.Status.Phase = v1beta1.ApplicationInstancePhaseReady
-		a.Status.Ipv4Address = "34.154.251.170"
 		upErr := r.Status().Update(ctx, a.DeepCopy())
 		if upErr != nil {
 			log.Error(upErr, errorUpdatingResourceStatusMsg)
@@ -208,7 +207,7 @@ func (r *ApplicationInstanceReconciler) handleExternalAppInstCreation(
 		log.Info("Created", "response", res)
 
 		a.Status.Phase = v1beta1.ApplicationInstancePhaseReady
-		a.Status.Ipv4Address = "34.154.251.170"
+
 		upErr := r.Status().Update(ctx, a.DeepCopy())
 		if upErr != nil {
 			log.Error(upErr, "Error Updating resource", "appInst", a.Name)

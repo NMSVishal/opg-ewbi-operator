@@ -135,10 +135,6 @@ spec:
                 type: string
               state:
                 type: string
-              ipv4Address:
-                description: IPv4 address associated with the ApplicationInstance.
-                type: string
-                pattern: ^((25[0-5]|2[0-4][0-9]|[0-1]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[0-1]?[0-9][0-9]?)$
             type: object
         type: object
     served: true
