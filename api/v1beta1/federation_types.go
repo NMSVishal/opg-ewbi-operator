@@ -60,8 +60,9 @@ type FederationSpec struct {
 	Partner Partner `json:"partner,omitempty"`
 
 	// OfferedAvailabilityZones, list of AvailabilityZones the hostOP offers to the guestOP
-	// as part of this Federation
-	OfferedAvailabilityZones []string `json:"offeredAvailabilityZones,omitempty"`
+
+	//OfferedAvailabilityZones []string `json:"offeredAvailabilityZones,omitempty"`
+	OfferedAvailabilityZones []ZoneDetails `json:"offeredAvailabilityZones,omitempty"`
 
 	// AcceptedAvailabilityZones, subset the GuestOP accepts of the  AvailabilityZones
 	// the OP offered for this Federation
