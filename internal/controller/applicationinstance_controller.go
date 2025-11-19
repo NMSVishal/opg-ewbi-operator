@@ -21,7 +21,7 @@ import (
 	"errors"
 	"time"
 
-	opgmodels "github.com/neonephos-katalis/opg-ewbi-api/api/federation/models"
+	opgmodels "github.com/NMSVishal/opg-ewbi-api/api/federation/models"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -29,9 +29,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/neonephos-katalis/opg-ewbi-operator/api/v1beta1"
-	opgewbiv1beta1 "github.com/neonephos-katalis/opg-ewbi-operator/api/v1beta1"
-	"github.com/neonephos-katalis/opg-ewbi-operator/internal/opg"
+	"github.com/NMSVishal/opg-ewbi-operator/api/v1beta1"
+	opgewbiv1beta1 "github.com/NMSVishal/opg-ewbi-operator/api/v1beta1"
+	"github.com/NMSVishal/opg-ewbi-operator/internal/opg"
 )
 
 // ApplicationInstanceReconciler reconciles a ApplicationInstance object
@@ -129,26 +129,68 @@ func (r *ApplicationInstanceReconciler) Reconcile(
 		}
 	}
 
-	// if federation is guest, send OPG API request
-	if isGuest {
-		if err := r.handleExternalAppInstCreation(ctx, &a, feder); err != nil {
-			log.Info("error creating appInst")
-			a.Status.Phase = v1beta1.ApplicationInstancePhaseError
+	if a.CreationTimestamp.IsZero() {
+		// if federation is guest, send OPG API request
+		if isGuest {
+			if err := r.handleExternalAppInstCreation(ctx, &a, feder); err != nil {
+				log.Info("error creating appInst")
+				a.Status.Phase = v1beta1.ApplicationInstancePhaseError
+				upErr := r.Status().Update(ctx, a.DeepCopy())
+				if upErr != nil {
+					log.Error(upErr, errorUpdatingResourceStatusMsg)
+				}
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+			}
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil // Guest will requeue to check app instance status later
+		} else {
+			//a.Status.Phase = v1beta1.ApplicationInstancePhaseReady
+			a.Status.Phase = opgewbiv1beta1.ApplicationInstancePhase(v1beta1.ApplicationInstanceStatePending)
+			// assign empty AccessPointInfo struct
+			a.Status.AccessPointInfo = v1beta1.AccessPointInfo{}
 			upErr := r.Status().Update(ctx, a.DeepCopy())
 			if upErr != nil {
 				log.Error(upErr, errorUpdatingResourceStatusMsg)
 			}
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+			//return ctrl.Result{}, nil
+			return ctrl.Result{RequeueAfter: 60 * time.Second}, nil // Host will requeue to manage internal appInst later
 		}
 	} else {
-		a.Status.Phase = v1beta1.ApplicationInstancePhaseReady
-		upErr := r.Status().Update(ctx, a.DeepCopy())
-		if upErr != nil {
-			log.Error(upErr, errorUpdatingResourceStatusMsg)
+		log.Info("AppInst Update Event Occured")
+		if isGuest {
+			if err := r.handleExternalAppInstStatusCheck(ctx, &a, feder); err != nil {
+				log.Info("error creating appInst")
+				a.Status.Phase = v1beta1.ApplicationInstancePhaseError
+				upErr := r.Status().Update(ctx, a.DeepCopy())
+				if upErr != nil {
+					log.Error(upErr, errorUpdatingResourceStatusMsg)
+				}
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+			}
+			// check if status is Ready return withour requeue and else requeue
+			if a.Status.Phase != v1beta1.ApplicationInstancePhaseReady {
+				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+			}
+			return ctrl.Result{}, nil
+		} else {
+			// Host operator will manage internal appInst state here
+			// For now, we just set it to Ready ,Later it will be like pod creation checking
+			a.Status.Phase = opgewbiv1beta1.ApplicationInstancePhase(v1beta1.ApplicationInstanceStateReady)
+			a.Status.AccessPointInfo = v1beta1.AccessPointInfo{
+				InterfaceId: "test",
+				AccessPoint: v1beta1.AccessPoint{
+					Port:          8080,
+					Fqdn:          "example.app.instance.local",
+					Ipv4Addresses: "34.154.251.179",
+				},
+			}
+			upErr := r.Status().Update(ctx, a.DeepCopy())
+			if upErr != nil {
+				log.Error(upErr, errorUpdatingResourceStatusMsg)
+			}
+			return ctrl.Result{}, nil
 		}
-		return ctrl.Result{}, nil
-	}
 
+	}
 	return ctrl.Result{}, nil
 }
 
@@ -289,5 +331,54 @@ func (r *ApplicationInstanceReconciler) handleExternalAppInstDeletion(
 	default:
 		log.Info(unexpectedStatusCodeMsg, "status", statusCode, "body", string(res.Body))
 	}
+	return nil
+}
+
+func (r *ApplicationInstanceReconciler) handleExternalAppInstStatusCheck(
+	ctx context.Context, a *v1beta1.ApplicationInstance, feder *v1beta1.Federation,
+) error {
+	log := log.FromContext(ctx)
+	log.Info("Checking external appInst status")
+
+	// call here GetAppInstanceDetails(c echo.Context, federationContextId models.FederationContextId, appId models.AppIdentifier, appInstanceId models.InstanceIdentifier, zoneId models.ZoneIdentifier)
+	res, err := r.GetOPGClient(
+		feder.Labels[v1beta1.ExternalIdLabel],
+		feder.Spec.GuestPartnerCredentials.TokenUrl,
+		feder.Spec.GuestPartnerCredentials.ClientId,
+	).GetAppInstanceDetailsWithResponse(
+		context.TODO(),
+		feder.Status.FederationContextId,
+		a.Spec.AppId,
+		a.Labels[v1beta1.ExternalIdLabel],
+		a.Spec.ZoneInfo.ZoneId,
+	)
+	if err != nil {
+		log.Error(err, "error checking appInst status")
+		return err
+	}
+
+	statusCode := res.StatusCode()
+	switch {
+	case statusCode >= 200 && statusCode < 300:
+		log.Info("Successfully retrieved appInst status", "response", res)
+		// Update the ApplicationInstance status based on the response
+		//a.Status.Phase = v1beta1.ApplicationInstancePhaseReady
+		upErr := r.Status().Update(ctx, a.DeepCopy())
+		if upErr != nil {
+			log.Error(upErr, "Error updating resource status", "appInst", a.Name)
+			return upErr
+		}
+	case statusCode == 404:
+		log.Info("AppInst not found in external system")
+		a.Status.Phase = v1beta1.ApplicationInstancePhaseError
+		upErr := r.Status().Update(ctx, a.DeepCopy())
+		if upErr != nil {
+			log.Error(upErr, "Error updating resource status", "appInst", a.Name)
+			return upErr
+		}
+	default:
+		log.Info("Unexpected status code", "status", statusCode, "body", string(res.Body))
+	}
+
 	return nil
 }

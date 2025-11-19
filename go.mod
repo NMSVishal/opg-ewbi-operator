@@ -1,12 +1,13 @@
-module github.com/neonephos-katalis/opg-ewbi-operator
+module github.com/NMSVishal/opg-ewbi-operator
 
 go 1.24.6
 
 toolchain go1.24.8
 
+
 require (
-	github.com/neonephos-katalis/opg-ewbi-api v0.0.0-20251112113525-d2030df7179f
 	github.com/gorilla/mux v1.8.1
+	github.com/NMSVishal/opg-ewbi-api v0.0.0-20251112113525-d2030df7179f
 	github.com/stretchr/testify v1.9.0
 	k8s.io/apimachinery v0.32.0
 	k8s.io/client-go v0.32.0
