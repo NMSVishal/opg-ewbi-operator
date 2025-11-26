@@ -1,11 +1,12 @@
-module github.com/NMSVishal/opg-ewbi-operator
+module github.com/neonephos-katalis/opg-ewbi-operator
 
 go 1.24.6
 
 toolchain go1.24.8
 
+
 require (
-	github.com/NMSVishal/opg-ewbi-api v0.0.0-20251119120817-f63a7f878b8a
+	github.com/neonephos-katalis/opg-ewbi-api v0.0.0-20251119120817-f63a7f878b8a
 	github.com/gorilla/mux v1.8.1
 	github.com/stretchr/testify v1.9.0
 	k8s.io/apimachinery v0.32.0
@@ -19,6 +20,7 @@ require (
 	github.com/getkin/kin-openapi v0.112.0 // indirect
 	github.com/golang-jwt/jwt v3.2.2+incompatible // indirect
 	github.com/invopop/yaml v0.1.0 // indirect
+	github.com/joho/godotenv v1.5.1 // indirect
 	github.com/labstack/echo/v4 v4.11.4 // indirect
 	github.com/labstack/gommon v0.4.2 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect

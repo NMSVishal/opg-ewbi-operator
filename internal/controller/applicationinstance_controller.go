@@ -18,20 +18,24 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
+	"strconv"
+	"sync"
 	"time"
 
-	opgmodels "github.com/NMSVishal/opg-ewbi-api/api/federation/models"
+	opgmodels "github.com/neonephos-katalis/opg-ewbi-api/api/federation/models"
+	"github.com/neonephos-katalis/opg-ewbi-operator/api/v1beta1"
+	opgewbiv1beta1 "github.com/neonephos-katalis/opg-ewbi-operator/api/v1beta1"
+	"github.com/neonephos-katalis/opg-ewbi-operator/internal/opg"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-
-	"github.com/NMSVishal/opg-ewbi-operator/api/v1beta1"
-	opgewbiv1beta1 "github.com/NMSVishal/opg-ewbi-operator/api/v1beta1"
-	"github.com/NMSVishal/opg-ewbi-operator/internal/opg"
 )
 
 // ApplicationInstanceReconciler reconciles a ApplicationInstance object
@@ -39,6 +43,59 @@ type ApplicationInstanceReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 	opg.OPGClientsMapInterface
+	retryCounter sync.Map `json:"-"` // key: NamespacedName, value: int
+
+}
+
+var retryLimit int = 6
+var guestRetryTime int = 20 // seconds
+var hostRetryTime int = 20  // seconds
+
+var initOnce sync.Once
+
+func (r *ApplicationInstanceReconciler) init(ctx context.Context,
+	req ctrl.Request) {
+	log := log.FromContext(ctx).WithValues("name", req.Name, "namespace", req.Namespace)
+
+	log.Info("Initializing ApplicationInstanceReconciler settings from environment variables")
+	val := os.Getenv("RETRY_LIMIT")
+	if val == "" {
+		log.Info("RETRY_LIMIT not set, using default 6")
+		retryLimit = 6 // default if env not set
+	} else {
+		limit, err := strconv.Atoi(val)
+		if err != nil {
+			log.Info("Invalid RETRY_LIMIT value, using default 6")
+			retryLimit = 6
+		} else {
+			retryLimit = limit
+		}
+	}
+	// set guestRetryTime from env if exists
+	guestVal := os.Getenv("GUEST_RETRY_TIME")
+	if guestVal != "" {
+		time, err := strconv.Atoi(guestVal)
+		if err != nil {
+			log.Info("Invalid GUEST_RETRY_TIME value, using default 10 seconds")
+		} else {
+			log.Info("Setting guestRetryTime from env", "value", time)
+			guestRetryTime = time
+		}
+	}
+	// set hostRetryTime from env if exists
+	hostVal := os.Getenv("HOST_RETRY_TIME")
+	if hostVal != "" {
+		time, err := strconv.Atoi(hostVal)
+		if err != nil {
+			log.Info("Invalid HOST_RETRY_TIME value, using default 60 seconds")
+		} else {
+			log.Info("Setting hostRetryTime from env", "value", time)
+			hostRetryTime = time
+		}
+	}
+
+	fmt.Printf("Initialized env vars: RETRY_LIMIT=%d, GUEST_RETRY_TIME=%d, HOST_RETRY_TIME=%d\n",
+		retryLimit, guestRetryTime, hostRetryTime)
 }
 
 // +kubebuilder:rbac:groups=opg.ewbi.nby.one,resources=applicationinstances,verbs=*,namespace=foo
@@ -128,53 +185,96 @@ func (r *ApplicationInstanceReconciler) Reconcile(
 			return ctrl.Result{}, nil
 		}
 	}
+	initOnce.Do(func() {
+		r.init(ctx, req)
+	})
 
-	if a.CreationTimestamp.IsZero() {
-		// if federation is guest, send OPG API request
+	//r.init(ctx, req)
+	// Creation or Update Event Handling
+	//if a.Labels[v1beta1.CreateEventLabel] == "true" {
+	if a.Status.State == "" {
+		log.Info("AppInst Creation Event Occured, reque after handling ", "retryAfter", time.Duration(guestRetryTime))
 		if isGuest {
 			if err := r.handleExternalAppInstCreation(ctx, &a, feder); err != nil {
 				log.Info("error creating appInst")
 				a.Status.Phase = v1beta1.ApplicationInstancePhaseError
+				// update label create-event to false to avoid reprocessing
+				a.Labels[v1beta1.CreateEventLabel] = "false"
 				upErr := r.Status().Update(ctx, a.DeepCopy())
 				if upErr != nil {
 					log.Error(upErr, errorUpdatingResourceStatusMsg)
 				}
-				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+				return ctrl.Result{RequeueAfter: time.Duration(guestRetryTime) * time.Second}, nil
 			}
-			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil // Guest will requeue to check app instance status later
+			return ctrl.Result{RequeueAfter: time.Duration(guestRetryTime) * time.Second}, nil // Guest will requeue to check app instance status later
 		} else {
-			//a.Status.Phase = v1beta1.ApplicationInstancePhaseReady
 			a.Status.Phase = opgewbiv1beta1.ApplicationInstancePhase(v1beta1.ApplicationInstanceStatePending)
+			a.Status.State = v1beta1.ApplicationInstanceStatePending
 			// assign empty AccessPointInfo struct
 			a.Status.AccessPointInfo = v1beta1.AccessPointInfo{}
+			a.Labels[v1beta1.CreateEventLabel] = "false"
 			upErr := r.Status().Update(ctx, a.DeepCopy())
 			if upErr != nil {
+				log.Info("Error updating resource status", "appInst", a.Name)
 				log.Error(upErr, errorUpdatingResourceStatusMsg)
 			}
 			//return ctrl.Result{}, nil
-			return ctrl.Result{RequeueAfter: 60 * time.Second}, nil // Host will requeue to manage internal appInst later
+			return ctrl.Result{RequeueAfter: time.Duration(hostRetryTime) * time.Second}, nil // Host will requeue to manage internal appInst later
 		}
 	} else {
 		log.Info("AppInst Update Event Occured")
 		if isGuest {
+			log.Info("Handling guest appInst status check, reque after handling ", "retryAfter", time.Duration(guestRetryTime), "retryLimit", retryLimit)
 			if err := r.handleExternalAppInstStatusCheck(ctx, &a, feder); err != nil {
 				log.Info("error creating appInst")
 				a.Status.Phase = v1beta1.ApplicationInstancePhaseError
+				//a.Status.State = v1beta1.ApplicationInstanceStateError
 				upErr := r.Status().Update(ctx, a.DeepCopy())
 				if upErr != nil {
 					log.Error(upErr, errorUpdatingResourceStatusMsg)
 				}
-				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+				return ctrl.Result{RequeueAfter: time.Duration(guestRetryTime) * time.Second}, nil
 			}
+
+			// Get current count
+			val, _ := r.retryCounter.LoadOrStore(req.NamespacedName.String(), 0)
+			count := val.(int)
+			if count >= retryLimit && a.Status.State != v1beta1.ApplicationInstanceStateReady {
+				// Stop retrying after 3 attempts
+				log.Info("Retry limit reached for", "application instance CR ", req.NamespacedName)
+				a.Status.State = v1beta1.ApplicationInstanceStateFailed
+				a.Status.Phase = v1beta1.ApplicationInstancePhaseError
+
+				upErr := r.Status().Update(ctx, a.DeepCopy())
+				if upErr != nil {
+					log.Error(upErr, "Error updating resource status", "appInst", a.Name)
+					return ctrl.Result{}, upErr
+				}
+				return ctrl.Result{}, nil
+			}
+			r.retryCounter.Store(req.NamespacedName.String(), count+1)
 			// check if status is Ready return withour requeue and else requeue
-			if a.Status.Phase != v1beta1.ApplicationInstancePhaseReady {
-				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+			if a.Status.State != v1beta1.ApplicationInstanceStateReady {
+				log.Info("## Status not ready, requeuing", "current state", a.Status.State)
+				//return ctrl.Result{RequeueAfter: time.Duration(guestRetryTime) * time.Second}, nil
+				return ctrl.Result{RequeueAfter: time.Duration(guestRetryTime) * time.Second}, nil
 			}
 			return ctrl.Result{}, nil
 		} else {
+			log.Info("Handling host appInst status management, reque after handling ", "retryAfter", time.Duration(hostRetryTime), "retryLimit", 3)
 			// Host operator will manage internal appInst state here
 			// For now, we just set it to Ready ,Later it will be like pod creation checking
+			val, _ := r.retryCounter.LoadOrStore(req.NamespacedName.String(), 0)
+			count := val.(int)
+			if count <= 3 && a.Status.State != v1beta1.ApplicationInstanceStateReady {
+				log.Info("## Status not ready, requeuing", "current retry count", count)
+				r.retryCounter.Store(req.NamespacedName.String(), count+1)
+				return ctrl.Result{RequeueAfter: time.Duration(hostRetryTime) * time.Second}, nil
+			}
+
 			a.Status.Phase = opgewbiv1beta1.ApplicationInstancePhase(v1beta1.ApplicationInstanceStateReady)
+			a.Status.State = v1beta1.ApplicationInstanceStateReady
+
 			a.Status.AccessPointInfo = v1beta1.AccessPointInfo{
 				InterfaceId: "test",
 				AccessPoint: v1beta1.AccessPoint{
@@ -183,15 +283,18 @@ func (r *ApplicationInstanceReconciler) Reconcile(
 					Ipv4Addresses: "34.154.251.179",
 				},
 			}
+			log.Info("Updating status", "AccessPointInfo", a.Status.AccessPointInfo)
 			upErr := r.Status().Update(ctx, a.DeepCopy())
 			if upErr != nil {
+				log.Info("Error updating resource status", "appInst", a.Name)
 				log.Error(upErr, errorUpdatingResourceStatusMsg)
 			}
+			log.Info("## Host appInst is ready, no requeue needed")
 			return ctrl.Result{}, nil
 		}
 
 	}
-	return ctrl.Result{}, nil
+	//return ctrl.Result{}, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -248,7 +351,8 @@ func (r *ApplicationInstanceReconciler) handleExternalAppInstCreation(
 	case statusCode >= 200 && statusCode < 300:
 		log.Info("Created", "response", res)
 
-		a.Status.Phase = v1beta1.ApplicationInstancePhaseReady
+		a.Status.Phase = v1beta1.ApplicationInstancePhaseReconciling
+		a.Status.State = v1beta1.ApplicationInstanceStatePending
 
 		upErr := r.Status().Update(ctx, a.DeepCopy())
 		if upErr != nil {
@@ -360,9 +464,74 @@ func (r *ApplicationInstanceReconciler) handleExternalAppInstStatusCheck(
 	statusCode := res.StatusCode()
 	switch {
 	case statusCode >= 200 && statusCode < 300:
-		log.Info("Successfully retrieved appInst status", "response", res)
-		// Update the ApplicationInstance status based on the response
-		//a.Status.Phase = v1beta1.ApplicationInstancePhaseReady
+		log.Info("AppInst status response", "response", res)
+		log.Info("Successfully retrieved appInst status into string", "response", string(res.Body))
+
+		var responseBody map[string]interface{}
+		if err := json.Unmarshal([]byte(string(res.Body)), &responseBody); err != nil {
+			log.Error(err, "Failed to unmarshal response body")
+			return err
+		}
+		log.Info("Successfully retrieved appInst status into map", "response", responseBody)
+
+		log.Info("## response type in response", "type", fmt.Sprintf("%T", responseBody["response"]))
+
+		// Check for accesspointInfo
+		rawAccessPointInfo, accessPointInfoExists := responseBody["accesspointInfo"]
+		log.Info("Checking accesspointInfo", "exists", accessPointInfoExists, "type", fmt.Sprintf("%T", rawAccessPointInfo))
+		if accessPointInfoArr, ok := rawAccessPointInfo.([]interface{}); ok && len(accessPointInfoArr) > 0 {
+			log.Info("## Found accessPointInfo in response")
+			var apiAccessPointInfo v1beta1.AccessPointInfo
+			if firstAccessPointInfo, ok := accessPointInfoArr[0].(map[string]interface{}); ok {
+				apiAccessPointInfo.InterfaceId, _ = firstAccessPointInfo["interfaceId"].(string)
+				if accessPoint, ok := firstAccessPointInfo["accessPoints"].(map[string]interface{}); ok {
+					var apiAccessPoint v1beta1.AccessPoint
+					if port, ok := accessPoint["port"].(float64); ok {
+						apiAccessPoint.Port = int(port)
+					}
+					apiAccessPoint.Fqdn, _ = accessPoint["fqdn"].(string)
+					if ipv4Arr, ok := accessPoint["ipv4Addresses"].([]interface{}); ok && len(ipv4Arr) > 0 {
+						if firstIpv4, ok := ipv4Arr[0].(string); ok {
+							apiAccessPoint.Ipv4Addresses = firstIpv4
+						}
+					}
+					if ipv6Arr, ok := accessPoint["ipv6Addresses"].([]interface{}); ok && len(ipv6Arr) > 0 {
+						if firstIpv6, ok := ipv6Arr[0].(string); ok {
+							apiAccessPoint.Ipv6Addresses = firstIpv6
+						}
+					}
+					apiAccessPointInfo.AccessPoint = apiAccessPoint
+				}
+				a.Status.AccessPointInfo = apiAccessPointInfo
+			}
+		} else {
+			log.Info("## accessPointInfo not found or empty in response", "type", fmt.Sprintf("%T", rawAccessPointInfo))
+		}
+
+		// Check for appInstanceState
+		rawAppInstanceState, appInstanceStateExists := responseBody["appInstanceState"]
+		log.Info("Checking appInstanceState", "exists", appInstanceStateExists, "type", fmt.Sprintf("%T", rawAppInstanceState))
+		if state, ok := rawAppInstanceState.(string); ok {
+			log.Info("## Found state in response", "state", state)
+			a.Status.State = v1beta1.ApplicationInstanceState(state)
+			switch a.Status.State {
+			case v1beta1.ApplicationInstanceStateReady:
+				a.Status.Phase = v1beta1.ApplicationInstancePhaseReady
+			case v1beta1.ApplicationInstanceStatePending:
+				a.Status.Phase = v1beta1.ApplicationInstancePhaseReconciling
+			case v1beta1.ApplicationInstanceStateFailed:
+				a.Status.Phase = v1beta1.ApplicationInstancePhaseError
+			case v1beta1.ApplicationInstanceStateTerminating:
+				a.Status.Phase = v1beta1.ApplicationInstancePhaseUnknown
+			default:
+				a.Status.Phase = v1beta1.ApplicationInstancePhaseUnknown
+			}
+		} else {
+			log.Info("## appInstanceState not found in response", "type", fmt.Sprintf("%T", rawAppInstanceState))
+		}
+
+		log.Info("Updated AppInst status", "AccessPointInfo", a.Status.AccessPointInfo, "State", a.Status.State, "Phase", a.Status.Phase)
+
 		upErr := r.Status().Update(ctx, a.DeepCopy())
 		if upErr != nil {
 			log.Error(upErr, "Error updating resource status", "appInst", a.Name)

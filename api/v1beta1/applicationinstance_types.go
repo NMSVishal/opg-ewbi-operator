@@ -34,6 +34,9 @@ const (
 	ApplicationInstancePhaseUnknown     ApplicationInstancePhase = "Unknown"
 )
 
+// CreateEventLabel is used to identify create events for ApplicationInstance
+const CreateEventLabel = "create-event"
+
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
 // ApplicationInstanceSpec defines the desired state of ApplicationInstance.

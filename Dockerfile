@@ -20,7 +20,6 @@ RUN --mount=type=secret,id=netrc,dst=/root/.netrc \
 COPY cmd/main.go cmd/main.go
 COPY api/ api/
 COPY internal/ internal/
-
 FROM base AS builder
 # Build
 # the GOARCH has not a default value to allow the binary be built according to the host where the command

@@ -20,9 +20,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/NMSVishal/opg-ewbi-operator/api/v1beta1"
-	opgewbiv1beta1 "github.com/NMSVishal/opg-ewbi-operator/api/v1beta1"
-	"github.com/NMSVishal/opg-ewbi-operator/internal/opg"
+	"github.com/neonephos-katalis/opg-ewbi-operator/api/v1beta1"
+	opgewbiv1beta1 "github.com/neonephos-katalis/opg-ewbi-operator/api/v1beta1"
+	"github.com/neonephos-katalis/opg-ewbi-operator/internal/opg"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

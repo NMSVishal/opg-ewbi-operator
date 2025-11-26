@@ -20,9 +20,9 @@ import (
 	"context"
 	"errors"
 
+	opgmodels "github.com/neonephos-katalis/opg-ewbi-api/api/federation/models"
+	"github.com/neonephos-katalis/opg-ewbi-operator/api/v1beta1"
 	"github.com/go-logr/logr"
-	opgmodels "github.com/NMSVishal/opg-ewbi-api/api/federation/models"
-	"github.com/NMSVishal/opg-ewbi-operator/api/v1beta1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"

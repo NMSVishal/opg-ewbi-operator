@@ -16,6 +16,11 @@ metadata:
   name: fed-e35f69d8-ae5a-456b-9f95-d950e4c03e8d # prefix-uuid
 spec:
   offeredAvailabilityZones:
-    - 2a8fffaf-50de-4f93-8c6f-05f1c84b5a5f # uuid
+    - zoneId: "2a8fffaf-50de-4f93-8c6f-05f1c84b5a5f"
+      geolocation: "1.9723,14.4582"
+      geographyDetails: "test 1"
+    - zoneId: "2a8fffaf-50de-4f93-8c6f-05f1c84b5a6f"
+      geolocation: "1.9724,14.4584"
+      geographyDetails: "test 4"
   guestPartnerCredentials:
     clientId:   3acde22c-d245-480d-b01e-24e38e01806d # uuid
