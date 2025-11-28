@@ -18,7 +18,13 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
+	"strconv"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	opgmodels "github.com/neonephos-katalis/opg-ewbi-api/api/federation/models"
@@ -44,6 +50,31 @@ type ApplicationReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 	opg.OPGClientsMapInterface
+}
+
+var applicationGuestRetryTime int = 60 // default 10 seconds
+var initOne sync.Once
+
+var updateCounter int32 = 0
+
+func (r *ApplicationReconciler) init(ctx context.Context,
+	req ctrl.Request) {
+	log := log.FromContext(ctx).WithValues("name", req.Name, "namespace", req.Namespace)
+
+	log.Info("Initializing ApplicationReconciler settings from environment variables")
+
+	// set applicationGuestRetryTime from env var if defined
+	hostVal := os.Getenv("APPLICATION_GUEST_RETRY_TIME")
+	if hostVal != "" {
+		time, err := strconv.Atoi(hostVal)
+		if err != nil {
+			log.Info("Invalid APPLICATION_GUEST_RETRY_TIME value, using default 60 seconds")
+		} else {
+			log.Info("Setting hostRetryTime from env", "value", time)
+			applicationGuestRetryTime = time
+		}
+	}
+	fmt.Printf("Initialized env vars: APPLICATION_GUEST_RETRY_TIME=%d\n", applicationGuestRetryTime)
 }
 
 // +kubebuilder:rbac:groups=opg.ewbi.nby.one,resources=applications,verbs=*,namespace=foo
@@ -133,26 +164,186 @@ func (r *ApplicationReconciler) Reconcile(
 		}
 	}
 
-	// if federation is guest, send OPG API request
-	if isGuest {
-		if err := r.handleExternalAppCreation(ctx, &a, feder); err != nil {
-			log.Info("error creating app")
-			a.Status.Phase = v1beta1.ApplicationPhaseError
+	initOne.Do(func() {
+		r.init(ctx, req)
+	})
+
+	// handle create call here
+	if a.Status.Phase == "" {
+		// if federation is guest, send OPG API request
+		if isGuest {
+			if err := r.handleExternalAppCreation(ctx, &a, feder); err != nil {
+				log.Info("####error creating app")
+				a.Status.Phase = v1beta1.ApplicationPhaseError
+				upErr := r.Status().Update(ctx, a.DeepCopy())
+				if upErr != nil {
+					log.Error(upErr, errorUpdatingResourceStatusMsg)
+				}
+				return ctrl.Result{RequeueAfter: time.Duration(guestRetryTime) * time.Second}, nil
+			}
+			return ctrl.Result{RequeueAfter: time.Duration(guestRetryTime)}, nil
+		} else {
+			a.Status.Phase = v1beta1.ApplicationPhaseReady
+			//a.Status.Phase = v1beta1.ApplicationPhaseReconciling
 			upErr := r.Status().Update(ctx, a.DeepCopy())
 			if upErr != nil {
 				log.Error(upErr, errorUpdatingResourceStatusMsg)
 			}
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+			return ctrl.Result{}, nil
 		}
 	} else {
-		a.Status.Phase = v1beta1.ApplicationPhaseReady
-		upErr := r.Status().Update(ctx, a.DeepCopy())
-		if upErr != nil {
-			log.Error(upErr, errorUpdatingResourceStatusMsg)
+		log.Info(" Application update received")
+		if isGuest {
+			if atomic.LoadInt32(&updateCounter) == 0 {
+				// First time: skip update
+				atomic.StoreInt32(&updateCounter, 1)
+				log.Info("#### Skipping  first update call ###")
+				return ctrl.Result{RequeueAfter: time.Duration(guestRetryTime) * time.Second}, nil
+			}
+			log.Info(" Checking External app updates")
+			if err := r.handleExternalAppUpdate(ctx, &a, feder); err != nil {
+				log.Info("error updating app")
+				a.Status.Phase = v1beta1.ApplicationPhaseError
+				upErr := r.Status().Update(ctx, a.DeepCopy())
+				if upErr != nil {
+					log.Error(upErr, errorUpdatingResourceStatusMsg)
+				}
+				return ctrl.Result{}, nil
+			}
+			// check is status is reconciling , then requeue after guestRetryTime
+			if a.Status.Phase == v1beta1.ApplicationPhaseReconciling {
+				log.Info(" App is in reconciling state , Requeuing after guestRetryTime")
+				return ctrl.Result{RequeueAfter: time.Duration(guestRetryTime) * time.Second}, nil
+			}
+			return ctrl.Result{}, nil
+
+		} else {
+			log.Info(" Internal app update received")
+			if a.Status.Phase == "" {
+				log.Info(" Received empty status.phase , Setting phase to Ready")
+				a.Status.Phase = v1beta1.ApplicationPhaseReady
+			}
+			upErr := r.Status().Update(ctx, a.DeepCopy())
+			if upErr != nil {
+				log.Error(upErr, errorUpdatingResourceStatusMsg)
+			}
+			return ctrl.Result{}, nil
 		}
-		return ctrl.Result{}, nil
 	}
-	return ctrl.Result{}, nil
+}
+
+func (r *ApplicationReconciler) handleExternalAppUpdate(ctx context.Context, application *opgewbiv1beta1.Application, feder *opgewbiv1beta1.Federation) any {
+	log := log.FromContext(ctx)
+	log.Info("Fetching external app details")
+	res, err := r.GetOPGClient(
+		feder.Labels[v1beta1.ExternalIdLabel],
+		feder.Spec.GuestPartnerCredentials.TokenUrl,
+		feder.Spec.GuestPartnerCredentials.ClientId,
+	).ViewApplicationWithResponse(
+		context.TODO(),
+		feder.Status.FederationContextId,
+		application.Labels[v1beta1.ExternalIdLabel],
+	)
+	if err != nil {
+		log.Error(err, "error getting app")
+		return err
+	}
+
+	statusCode := res.StatusCode()
+
+	switch {
+	case statusCode >= 200 && statusCode < 300:
+		log.Info("Fetched external app details", "response", res)
+		// Update application status based on fetched details if needed
+		application.Status.Phase = v1beta1.ApplicationPhaseReady
+
+		log.Info("Successfully retrieved application into string", "response", string(res.Body))
+
+		var respBody map[string]interface{}
+		if err := json.Unmarshal([]byte(string(res.Body)), &respBody); err != nil {
+			log.Error(err, "Failed to unmarshal response body")
+			return err
+		}
+		log.Info("Successfully retrieved application into map", "response", respBody)
+		if appComponentSpecs, exists := respBody["appComponentSpecs"].([]interface{}); exists {
+			var componentSpecs []opgewbiv1beta1.ComponentSpecRef
+			for _, comp := range appComponentSpecs {
+				if compMap, ok := comp.(map[string]interface{}); ok {
+					if artefactId, ok := compMap["artefactId"].(string); ok {
+						componentSpecs = append(componentSpecs, opgewbiv1beta1.ComponentSpecRef{
+							ArtefactId: artefactId,
+						})
+					}
+				}
+			}
+			application.Spec.ComponentSpecs = componentSpecs
+		} else {
+			log.Info("appComponentSpecs not found in response")
+		}
+		// Example: Update QoSProfile fields
+		if appQoSProfile, exists := respBody["appQoSProfile"].(map[string]interface{}); exists {
+			if latencyConstraints, ok := appQoSProfile["latencyConstraints"].(string); ok {
+				application.Spec.QoSProfile.LatencyConstraints = string(latencyConstraints)
+			}
+			if multiUserClients, ok := appQoSProfile["multiUserClients"].(string); ok {
+				application.Spec.QoSProfile.MultiUserClients = string(multiUserClients)
+			}
+			if noOfUsersPerAppInst, ok := appQoSProfile["noOfUsersPerAppInst"].(float64); ok {
+				application.Spec.QoSProfile.UsersPerAppInst = int64(noOfUsersPerAppInst)
+			}
+			if appProvisioning, ok := appQoSProfile["appProvisioning"].(bool); ok {
+				application.Spec.QoSProfile.Provisioning = appProvisioning
+			}
+		}
+
+		if appMetaData, exists := respBody["appMetaData"].(map[string]interface{}); exists {
+			if appName, ok := appMetaData["appName"].(string); ok {
+				application.Spec.MetaData.Name = appName
+			}
+			if accessToken, ok := appMetaData["accessToken"].(string); ok {
+				application.Spec.MetaData.AccessToken = accessToken
+			}
+			if mobilitySupport, ok := appMetaData["mobilitySupport"].(bool); ok {
+				application.Spec.MetaData.MobilitySupport = mobilitySupport
+			}
+			if version, ok := appMetaData["version"].(string); ok {
+				application.Spec.MetaData.Version = version
+			}
+		}
+
+		if appProviderId, ok := respBody["appProviderId"].(string); ok {
+			application.Spec.AppProviderId = appProviderId
+		}
+
+		upErr := r.Status().Update(ctx, application.DeepCopy())
+		if upErr != nil {
+			log.Error(upErr, "Error Updating resource", "app", application.Name)
+			return upErr
+		}
+		log.Info("#####Application spec updated based on external app details")
+	case statusCode == 400:
+		handleProblemDetails(log, statusCode, res.ApplicationproblemJSON400)
+		log.Info("Couldn't fetch app", "Detail", res.ApplicationproblemJSON400.Detail)
+		return errors.New(*res.ApplicationproblemJSON400.Detail)
+	case statusCode == 401:
+		handleProblemDetails(log, statusCode, res.ApplicationproblemJSON401)
+	case statusCode == 404:
+		handleProblemDetails(log, statusCode, res.ApplicationproblemJSON404)
+	case statusCode == 409:
+		handleProblemDetails(log, statusCode, res.ApplicationproblemJSON409)
+	case statusCode == 422:
+		handleProblemDetails(log, statusCode, res.ApplicationproblemJSON422)
+	case statusCode == 500:
+		handleProblemDetails(log, statusCode, res.ApplicationproblemJSON500)
+	case statusCode == 503:
+		handleProblemDetails(log, statusCode, res.ApplicationproblemJSON503)
+	case statusCode == 520:
+		handleProblemDetails(log, statusCode, res.ApplicationproblemJSON520)
+	default:
+		log.Info(unexpectedStatusCodeMsg, "status", statusCode, "body", string(res.Body))
+	}
+	return nil
+
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -228,8 +419,8 @@ func (r *ApplicationReconciler) handleExternalAppCreation(
 	case statusCode >= 200 && statusCode < 300:
 		log.Info("Created", "response", res)
 
-		a.Status.Phase = v1beta1.ApplicationPhaseReady
-
+		//a.Status.Phase = v1beta1.ApplicationPhaseReady
+		a.Status.Phase = v1beta1.ApplicationPhaseReconciling
 		upErr := r.Status().Update(ctx, a.DeepCopy())
 		if upErr != nil {
 			log.Error(upErr, "Error Updating resource", "app", a.Name)

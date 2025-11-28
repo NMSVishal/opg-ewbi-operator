@@ -7,6 +7,7 @@ controllerManager:
       RETRY_LIMIT: "10"
       GUEST_RETRY_TIME: "15"
       HOST_RETRY_TIME: "60"
+      APPLICATION_GUEST_RETRY_TIME: "60"
     image:
       repository: registry.example.com/operators/opg-ewbi-operator
       tag: neonephos

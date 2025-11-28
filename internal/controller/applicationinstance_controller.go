@@ -256,43 +256,52 @@ func (r *ApplicationInstanceReconciler) Reconcile(
 			// check if status is Ready return withour requeue and else requeue
 			if a.Status.State != v1beta1.ApplicationInstanceStateReady {
 				log.Info("## Status not ready, requeuing", "current state", a.Status.State)
-				//return ctrl.Result{RequeueAfter: time.Duration(guestRetryTime) * time.Second}, nil
 				return ctrl.Result{RequeueAfter: time.Duration(guestRetryTime) * time.Second}, nil
 			}
 			return ctrl.Result{}, nil
 		} else {
 			log.Info("Handling host appInst status management, reque after handling ", "retryAfter", time.Duration(hostRetryTime), "retryLimit", 3)
-			// Host operator will manage internal appInst state here
-			// For now, we just set it to Ready ,Later it will be like pod creation checking
-			val, _ := r.retryCounter.LoadOrStore(req.NamespacedName.String(), 0)
-			count := val.(int)
-			if count <= 3 && a.Status.State != v1beta1.ApplicationInstanceStateReady {
-				log.Info("## Status not ready, requeuing", "current retry count", count)
-				r.retryCounter.Store(req.NamespacedName.String(), count+1)
-				return ctrl.Result{RequeueAfter: time.Duration(hostRetryTime) * time.Second}, nil
-			}
 
-			a.Status.Phase = opgewbiv1beta1.ApplicationInstancePhase(v1beta1.ApplicationInstanceStateReady)
-			a.Status.State = v1beta1.ApplicationInstanceStateReady
+			// val, _ := r.retryCounter.LoadOrStore(req.NamespacedName.String(), 0)
+			// count := val.(int)
+			// if count <= 3 && a.Status.State != v1beta1.ApplicationInstanceStateReady {
+			// 	log.Info("## Status not ready, requeuing", "current retry count", count)
+			// 	r.retryCounter.Store(req.NamespacedName.String(), count+1)
+			// 	return ctrl.Result{RequeueAfter: time.Duration(hostRetryTime) * time.Second}, nil
+			// }
 
-			a.Status.AccessPointInfo = v1beta1.AccessPointInfo{
-				InterfaceId: "test",
-				AccessPoint: v1beta1.AccessPoint{
-					Port:          8080,
-					Fqdn:          "example.app.instance.local",
-					Ipv4Addresses: "34.154.251.179",
-				},
+			// a.Status.Phase = opgewbiv1beta1.ApplicationInstancePhase(v1beta1.ApplicationInstanceStateReady)
+			// a.Status.State = v1beta1.ApplicationInstanceStateReady
+
+			// a.Status.AccessPointInfo = v1beta1.AccessPointInfo{
+			// 	InterfaceId: "test",
+			// 	AccessPoint: v1beta1.AccessPoint{
+			// 		Port:          8080,
+			// 		Fqdn:          "example.app.instance.local",
+			// 		Ipv4Addresses: "34.154.251.179",
+			// 	},
+			// }
+
+			log.Info("Handling host appInst status management")
+			// Ensure Phase matches State
+			if a.Status.State == "" {
+				log.Info("State is empty, defaulting to Pending")
+				a.Status.State = v1beta1.ApplicationInstanceStatePending
 			}
-			log.Info("Updating status", "AccessPointInfo", a.Status.AccessPointInfo)
-			upErr := r.Status().Update(ctx, a.DeepCopy())
-			if upErr != nil {
-				log.Info("Error updating resource status", "appInst", a.Name)
-				log.Error(upErr, errorUpdatingResourceStatusMsg)
+			a.Status.Phase = v1beta1.ApplicationInstancePhase(a.Status.State)
+			if (a.Status.AccessPointInfo == v1beta1.AccessPointInfo{}) {
+				log.Info("AccessPointInfo is empty in CR, consider populating it before reconcile")
+			} else {
+				log.Info("Using AccessPointInfo from incoming CR", "AccessPointInfo", a.Status.AccessPointInfo)
 			}
-			log.Info("## Host appInst is ready, no requeue needed")
+			// Update status without overwriting CR-provided values
+			if err := r.Status().Update(ctx, a.DeepCopy()); err != nil {
+				log.Error(err, "Error updating resource status", "appInst", a.Name)
+				return ctrl.Result{}, err
+			}
+			log.Info("Host appInst status updated successfully, no requeue needed")
 			return ctrl.Result{}, nil
 		}
-
 	}
 	//return ctrl.Result{}, nil
 }
